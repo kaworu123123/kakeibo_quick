@@ -1,0 +1,4 @@
+flutter build apk --debug
+
+
+C:\src\kakeibo_quick\build\app\outputs\flutter-apk

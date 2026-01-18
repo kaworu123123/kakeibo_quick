@@ -1,0 +1,4 @@
+cd "/c/src/kakeibo_quick"
+git add .
+git commit -m "test"
+git push

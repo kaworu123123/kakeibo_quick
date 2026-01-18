@@ -1,290 +1,372 @@
-import 'dart:io';
-
-import 'package:drift/drift.dart';
-import 'package:drift/native.dart';
+import 'dart:async';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:sqflite/sqflite.dart';
 
-part 'app_db.g.dart';
+class Expense {
+  final int id;
+  final DateTime date; // date only
+  final String category;
+  final int amount;
+  final String? memo;
 
-class Expenses extends Table {
-  IntColumn get id => integer().autoIncrement()();
-
-  // 日付（その日の0:00として保持）
-  DateTimeColumn get date => dateTime()();
-
-  TextColumn get category => text()();
-
-  IntColumn get amount => integer()();
-
-  TextColumn get memo => text().nullable()();
-
-  // 作成時刻（並び順用）
-  DateTimeColumn get createdAt => dateTime()();
+  Expense({
+    required this.id,
+    required this.date,
+    required this.category,
+    required this.amount,
+    required this.memo,
+  });
 }
 
-class Categories extends Table {
-  IntColumn get id => integer().autoIncrement()();
-  TextColumn get name => text()();
+class Category {
+  final int id;
+  final String name;
+  final int sortOrder;
 
-  // 表示順（小さいほど上）
-  IntColumn get sortOrder => integer()();
-
-  @override
-  List<Set<Column>>? get uniqueKeys => [
-    {name},
-  ];
+  Category({required this.id, required this.name, required this.sortOrder});
 }
 
 class CategoryTotal {
   final String category;
   final int total;
-  const CategoryTotal(this.category, this.total);
+  CategoryTotal({required this.category, required this.total});
 }
 
 class DayTotal {
-  final DateTime day; // その日の0:00
+  final DateTime day; // date only
   final int total;
-  const DayTotal(this.day, this.total);
+  DayTotal({required this.day, required this.total});
 }
 
-@DriftDatabase(tables: [Expenses, Categories])
-class AppDb extends _$AppDb {
-  AppDb() : super(_openConnection());
+class MonthTotal {
+  final DateTime month; // first day of month
+  final int total;
+  MonthTotal({required this.month, required this.total});
+}
 
-  @override
-  int get schemaVersion => 2;
+class AppDb {
+  Database? _db;
+  final StreamController<void> _change = StreamController<void>.broadcast();
 
-  static const List<String> defaultCategoryNames = [
-    '食費',
-    '日用品',
-    '交通',
-    '娯楽',
-    '医療',
-    'その他',
-  ];
+  Future<Database> get _database async {
+    if (_db != null) return _db!;
+    final dir = await getApplicationDocumentsDirectory();
+    final path = p.join(dir.path, 'kakeibo_quick.db');
 
-  @override
-  MigrationStrategy get migration => MigrationStrategy(
-    onCreate: (m) async {
-      await m.createAll();
-      await _seedDefaultCategoriesIfEmpty();
-    },
-    onUpgrade: (m, from, to) async {
-      if (from < 2) {
-        await m.createTable(categories);
-        await _seedDefaultCategoriesIfEmpty();
-      }
-    },
-  );
+    _db = await openDatabase(
+      path,
+      version: 1,
+      onCreate: (db, version) async {
+        await db.execute('''
+          CREATE TABLE categories(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            sort_order INTEGER NOT NULL
+          );
+        ''');
 
-  Future<void> _seedDefaultCategoriesIfEmpty() async {
-    final countRow = await customSelect(
-      'SELECT COUNT(*) AS c FROM categories',
-      readsFrom: {categories},
-    ).getSingle();
+        await db.execute('''
+          CREATE TABLE expenses(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,         -- YYYY-MM-DD
+            category TEXT NOT NULL,
+            amount INTEGER NOT NULL,
+            memo TEXT
+          );
+        ''');
 
-    final count = countRow.data['c'] as int? ?? 0;
-    if (count > 0) return;
-
-    await batch((b) {
-      for (int i = 0; i < defaultCategoryNames.length; i++) {
-        b.insert(
-          categories,
-          CategoriesCompanion.insert(
-            name: defaultCategoryNames[i],
-            sortOrder: i,
-          ),
-        );
-      }
-    });
-  }
-
-  // ---- カテゴリ ----
-  Stream<List<Category>> watchCategories() {
-    final q = select(categories)..orderBy([(t) => OrderingTerm.asc(t.sortOrder)]);
-    return q.watch();
-  }
-
-  Future<void> addCategory(String name) async {
-    final trimmed = name.trim();
-    if (trimmed.isEmpty) return;
-
-    final maxRow = await customSelect(
-      'SELECT COALESCE(MAX(sort_order), -1) AS m FROM categories',
-      readsFrom: {categories},
-    ).getSingle();
-    final maxSort = maxRow.data['m'] as int? ?? -1;
-
-    await into(categories).insert(
-      CategoriesCompanion.insert(
-        name: trimmed,
-        sortOrder: maxSort + 1,
-      ),
-      mode: InsertMode.insertOrIgnore,
+        // 初期カテゴリ
+        final init = ['食費', '日用品', '交通', '娯楽', '医療', 'その他'];
+        for (int i = 0; i < init.length; i++) {
+          await db.insert('categories', {
+            'name': init[i],
+            'sort_order': i,
+          });
+        }
+      },
     );
+
+    return _db!;
   }
 
-  Future<bool> categoryIsUsed(String name) async {
-    final row = await customSelect(
-      'SELECT COUNT(*) AS c FROM expenses WHERE category = ?',
-      variables: [Variable<String>(name)],
-      readsFrom: {expenses},
-    ).getSingle();
-    final c = row.data['c'] as int? ?? 0;
-    return c > 0;
-  }
-
-  Future<void> deleteCategoryById(int id) async {
-    await (delete(categories)..where((t) => t.id.equals(id))).go();
-  }
-
-  Future<void> updateCategoryOrder(List<Category> ordered) async {
-    await batch((b) {
-      for (int i = 0; i < ordered.length; i++) {
-        b.update(
-          categories,
-          CategoriesCompanion(sortOrder: Value(i)),
-          where: (t) => t.id.equals(ordered[i].id),
-        );
-      }
-    });
-  }
-
-  // ---- 支出 ----
-  Future<int> addExpense({
-    required DateTime date,
-    required String category,
-    required int amount,
-    String? memo,
-  }) {
-    return into(expenses).insert(
-      ExpensesCompanion.insert(
-        date: DateTime(date.year, date.month, date.day),
-        category: category,
-        amount: amount,
-        memo: Value(memo),
-        createdAt: DateTime.now(),
-      ),
-    );
-  }
-
-  Future<int> deleteExpenseById(int id) {
-    return (delete(expenses)..where((t) => t.id.equals(id))).go();
+  void _notify() {
+    if (!_change.isClosed) _change.add(null);
   }
 
   DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
 
-  // ---- 一覧（月指定）----
-  Stream<List<Expense>> watchMonthExpenses(DateTime month) {
-    final start = DateTime(month.year, month.month, 1);
-    final nextMonth = (month.month == 12)
-        ? DateTime(month.year + 1, 1, 1)
-        : DateTime(month.year, month.month + 1, 1);
+  String _dateStr(DateTime d) =>
+      '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
-    final q = select(expenses)
-      ..where((t) =>
-      t.date.isBiggerOrEqualValue(start) & t.date.isSmallerThanValue(nextMonth))
-      ..orderBy([(t) => OrderingTerm.desc(t.createdAt)]);
-
-    return q.watch();
+  Future<T> _fetch<T>(Future<T> Function(Database db) fn) async {
+    final db = await _database;
+    return fn(db);
   }
 
-  // ✅ 明細（日指定）←今回追加
-  Stream<List<Expense>> watchDayExpenses(DateTime day) {
-    final d = _dateOnly(day);
-    final q = select(expenses)
-      ..where((t) => t.date.equals(d))
-      ..orderBy([(t) => OrderingTerm.desc(t.createdAt)]);
-    return q.watch();
+  Stream<T> _watch<T>(Future<T> Function() fetch) async* {
+    yield await fetch();
+    await for (final _ in _change.stream) {
+      yield await fetch();
+    }
   }
 
-  // ---- 集計（今日） ----
-  Stream<int> watchTodayTotal() {
-    final today = _dateOnly(DateTime.now());
-    final sumExpr = expenses.amount.sum();
+  /* ===== Categories ===== */
 
-    final q = selectOnly(expenses)
-      ..addColumns([sumExpr])
-      ..where(expenses.date.equals(today));
-
-    return q.watchSingle().map((row) => row.read(sumExpr) ?? 0);
-  }
-
-  // ---- 集計（月指定：合計） ----
-  Stream<int> watchMonthTotal(DateTime month) {
-    final start = DateTime(month.year, month.month, 1);
-    final nextMonth = (month.month == 12)
-        ? DateTime(month.year + 1, 1, 1)
-        : DateTime(month.year, month.month + 1, 1);
-
-    final sumExpr = expenses.amount.sum();
-
-    final q = selectOnly(expenses)
-      ..addColumns([sumExpr])
-      ..where(expenses.date.isBiggerOrEqualValue(start) &
-      expenses.date.isSmallerThanValue(nextMonth));
-
-    return q.watchSingle().map((row) => row.read(sumExpr) ?? 0);
-  }
-
-  // ---- 集計（月指定：カテゴリ別） ----
-  Stream<List<CategoryTotal>> watchMonthCategoryTotals(DateTime month) {
-    final start = DateTime(month.year, month.month, 1);
-    final nextMonth = (month.month == 12)
-        ? DateTime(month.year + 1, 1, 1)
-        : DateTime(month.year, month.month + 1, 1);
-
-    final totalExpr = expenses.amount.sum();
-
-    final q = selectOnly(expenses)
-      ..addColumns([expenses.category, totalExpr])
-      ..where(expenses.date.isBiggerOrEqualValue(start) &
-      expenses.date.isSmallerThanValue(nextMonth))
-      ..groupBy([expenses.category]);
-
-    return q.watch().map((rows) {
+  Stream<List<Category>> watchCategories() => _watch(() async {
+    return _fetch((db) async {
+      final rows = await db.query('categories', orderBy: 'sort_order ASC, id ASC');
       return rows
-          .map((r) {
-        final cat = r.read(expenses.category)!;
-        final total = r.read(totalExpr) ?? 0;
-        return CategoryTotal(cat, total);
-      })
-          .toList()
-        ..sort((a, b) => b.total.compareTo(a.total));
+          .map((r) => Category(
+        id: (r['id'] as int),
+        name: (r['name'] as String),
+        sortOrder: (r['sort_order'] as int),
+      ))
+          .toList();
+    });
+  });
+
+  Future<void> addCategory(String name) async {
+    final n = name.trim();
+    if (n.isEmpty) return;
+
+    await _fetch((db) async {
+      final rows = await db.rawQuery('SELECT MAX(sort_order) as m FROM categories');
+      final maxOrder = (rows.first['m'] as int?) ?? -1;
+      await db.insert('categories', {'name': n, 'sort_order': maxOrder + 1});
+    });
+
+    _notify();
+  }
+
+  Future<void> deleteCategoryById(int id) async {
+    await _fetch((db) async {
+      await db.delete('categories', where: 'id = ?', whereArgs: [id]);
+    });
+    _notify();
+  }
+
+  Future<bool> categoryIsUsed(String categoryName) async {
+    return _fetch((db) async {
+      final rows = await db.query(
+        'expenses',
+        columns: ['id'],
+        where: 'category = ?',
+        whereArgs: [categoryName],
+        limit: 1,
+      );
+      return rows.isNotEmpty;
     });
   }
 
-  // ---- 集計（月指定：日別合計） ----
-  Stream<List<DayTotal>> watchMonthDailyTotals(DateTime month) {
+  Future<void> updateCategoryOrder(List<Category> ordered) async {
+    await _fetch((db) async {
+      final batch = db.batch();
+      for (int i = 0; i < ordered.length; i++) {
+        batch.update(
+          'categories',
+          {'sort_order': i},
+          where: 'id = ?',
+          whereArgs: [ordered[i].id],
+        );
+      }
+      await batch.commit(noResult: true);
+    });
+    _notify();
+  }
+
+  /* ===== Expenses ===== */
+
+  Future<void> addExpense({
+    required DateTime date,
+    required String category,
+    required int amount,
+    String? memo,
+  }) async {
+    final d = _dateOnly(date);
+    await _fetch((db) async {
+      await db.insert('expenses', {
+        'date': _dateStr(d),
+        'category': category,
+        'amount': amount,
+        'memo': memo,
+      });
+    });
+    _notify();
+  }
+
+  Future<void> deleteExpenseById(int id) async {
+    await _fetch((db) async {
+      await db.delete('expenses', where: 'id = ?', whereArgs: [id]);
+    });
+    _notify();
+  }
+
+  Stream<List<Expense>> watchMonthExpenses(DateTime month) => _watch(() async {
     final start = DateTime(month.year, month.month, 1);
-    final nextMonth = (month.month == 12)
+    final end = (month.month == 12)
         ? DateTime(month.year + 1, 1, 1)
         : DateTime(month.year, month.month + 1, 1);
 
-    final sumExpr = expenses.amount.sum();
+    return _fetch((db) async {
+      final rows = await db.query(
+        'expenses',
+        where: 'date >= ? AND date < ?',
+        whereArgs: [_dateStr(start), _dateStr(end)],
+        orderBy: 'date DESC, id DESC',
+      );
+      return rows.map(_rowToExpense).toList();
+    });
+  });
 
-    final q = selectOnly(expenses)
-      ..addColumns([expenses.date, sumExpr])
-      ..where(expenses.date.isBiggerOrEqualValue(start) &
-      expenses.date.isSmallerThanValue(nextMonth))
-      ..groupBy([expenses.date])
-      ..orderBy([OrderingTerm.asc(expenses.date)]);
+  Stream<List<Expense>> watchDayExpenses(DateTime day) => _watch(() async {
+    final start = DateTime(day.year, day.month, day.day);
+    final end = start.add(const Duration(days: 1));
 
-    return q.watch().map((rows) {
+    return _fetch((db) async {
+      final rows = await db.query(
+        'expenses',
+        where: 'date >= ? AND date < ?',
+        whereArgs: [_dateStr(start), _dateStr(end)],
+        orderBy: 'id DESC',
+      );
+      return rows.map(_rowToExpense).toList();
+    });
+  });
+
+  Expense _rowToExpense(Map<String, Object?> r) {
+    final ds = (r['date'] as String);
+    final parts = ds.split('-');
+    final d = DateTime(
+      int.parse(parts[0]),
+      int.parse(parts[1]),
+      int.parse(parts[2]),
+    );
+    return Expense(
+      id: (r['id'] as int),
+      date: d,
+      category: (r['category'] as String),
+      amount: (r['amount'] as int),
+      memo: r['memo'] as String?,
+    );
+  }
+
+  /* ===== Analytics ===== */
+
+  Stream<List<CategoryTotal>> watchMonthCategoryTotals(DateTime month) => _watch(() async {
+    final start = DateTime(month.year, month.month, 1);
+    final end = (month.month == 12)
+        ? DateTime(month.year + 1, 1, 1)
+        : DateTime(month.year, month.month + 1, 1);
+
+    return _fetch((db) async {
+      final rows = await db.rawQuery('''
+            SELECT category, SUM(amount) AS total
+            FROM expenses
+            WHERE date >= ? AND date < ?
+            GROUP BY category
+            ORDER BY total DESC
+          ''', [_dateStr(start), _dateStr(end)]);
+
+      return rows
+          .map((r) => CategoryTotal(
+        category: (r['category'] as String),
+        total: (r['total'] as int?) ?? 0,
+      ))
+          .toList();
+    });
+  });
+
+  Stream<List<DayTotal>> watchMonthDailyTotals(DateTime month) => _watch(() async {
+    final start = DateTime(month.year, month.month, 1);
+    final end = (month.month == 12)
+        ? DateTime(month.year + 1, 1, 1)
+        : DateTime(month.year, month.month + 1, 1);
+
+    return _fetch((db) async {
+      final rows = await db.rawQuery('''
+            SELECT date, SUM(amount) AS total
+            FROM expenses
+            WHERE date >= ? AND date < ?
+            GROUP BY date
+            ORDER BY date ASC
+          ''', [_dateStr(start), _dateStr(end)]);
+
       return rows.map((r) {
-        final day = r.read(expenses.date)!;
-        final total = r.read(sumExpr) ?? 0;
-        return DayTotal(day, total);
+        final ds = (r['date'] as String);
+        final p = ds.split('-');
+        final d = DateTime(int.parse(p[0]), int.parse(p[1]), int.parse(p[2]));
+        return DayTotal(day: d, total: (r['total'] as int?) ?? 0);
       }).toList();
     });
-  }
-}
-
-LazyDatabase _openConnection() {
-  return LazyDatabase(() async {
-    final dir = await getApplicationDocumentsDirectory();
-    final file = File(p.join(dir.path, 'kakeibo.sqlite'));
-    return NativeDatabase.createInBackground(file);
   });
+
+  Stream<int> watchMonthTotal(DateTime month) => _watch(() async {
+    final start = DateTime(month.year, month.month, 1);
+    final end = (month.month == 12)
+        ? DateTime(month.year + 1, 1, 1)
+        : DateTime(month.year, month.month + 1, 1);
+
+    return _fetch((db) async {
+      final rows = await db.rawQuery('''
+            SELECT SUM(amount) AS total
+            FROM expenses
+            WHERE date >= ? AND date < ?
+          ''', [_dateStr(start), _dateStr(end)]);
+      return (rows.first['total'] as int?) ?? 0;
+    });
+  });
+
+  Stream<int> watchTodayTotal() => _watch(() async {
+    final d = _dateOnly(DateTime.now());
+    final start = d;
+    final end = d.add(const Duration(days: 1));
+
+    return _fetch((db) async {
+      final rows = await db.rawQuery('''
+            SELECT SUM(amount) AS total
+            FROM expenses
+            WHERE date >= ? AND date < ?
+          ''', [_dateStr(start), _dateStr(end)]);
+      return (rows.first['total'] as int?) ?? 0;
+    });
+  });
+
+  // ✅ 新規：直近Nヶ月の月別合計（棒グラフ用）
+  Stream<List<MonthTotal>> watchRecentMonthTotals(int months) => _watch(() async {
+    final now = DateTime.now();
+    final start = DateTime(now.year, now.month - (months - 1), 1);
+    final end = DateTime(now.year, now.month + 1, 1);
+
+    return _fetch((db) async {
+      final rows = await db.rawQuery('''
+            SELECT strftime('%Y-%m', date) AS ym, SUM(amount) AS total
+            FROM expenses
+            WHERE date >= ? AND date < ?
+            GROUP BY ym
+            ORDER BY ym ASC
+          ''', [_dateStr(start), _dateStr(end)]);
+
+      final map = <String, int>{};
+      for (final r in rows) {
+        final ym = (r['ym'] as String?) ?? '';
+        final total = (r['total'] as int?) ?? 0;
+        map[ym] = total;
+      }
+
+      final list = <MonthTotal>[];
+      for (int i = 0; i < months; i++) {
+        final m = DateTime(start.year, start.month + i, 1);
+        final key = '${m.year.toString().padLeft(4, '0')}-${m.month.toString().padLeft(2, '0')}';
+        list.add(MonthTotal(month: m, total: map[key] ?? 0));
+      }
+      return list;
+    });
+  });
+
+  Future<void> close() async {
+    await _db?.close();
+    _db = null;
+    await _change.close();
+  }
 }
