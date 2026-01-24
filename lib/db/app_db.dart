@@ -45,6 +45,12 @@ class MonthTotal {
   MonthTotal({required this.month, required this.total});
 }
 
+class WeekTotal {
+  final DateTime weekStart; // Monday
+  final int total;
+  WeekTotal({required this.weekStart, required this.total});
+}
+
 class AppDb {
   Database? _db;
   final StreamController<void> _change = StreamController<void>.broadcast();
@@ -329,6 +335,67 @@ class AppDb {
             WHERE date >= ? AND date < ?
           ''', [_dateStr(start), _dateStr(end)]);
       return (rows.first['total'] as int?) ?? 0;
+    });
+  });
+
+  Stream<List<DayTotal>> watchRecentDayTotals(int days) => _watch(() async {
+    final today = _dateOnly(DateTime.now());
+    final start = today.subtract(Duration(days: days - 1));
+    final end = today.add(const Duration(days: 1));
+
+    return _fetch((db) async {
+      final rows = await db.rawQuery('''
+            SELECT date, SUM(amount) AS total
+            FROM expenses
+            WHERE date >= ? AND date < ?
+            GROUP BY date
+            ORDER BY date ASC
+          ''', [_dateStr(start), _dateStr(end)]);
+
+      final map = <String, int>{};
+      for (final r in rows) {
+        final ds = (r['date'] as String);
+        map[ds] = (r['total'] as int?) ?? 0;
+      }
+
+      final list = <DayTotal>[];
+      for (int i = 0; i < days; i++) {
+        final d = DateTime(start.year, start.month, start.day + i);
+        final key = _dateStr(d);
+        list.add(DayTotal(day: d, total: map[key] ?? 0));
+      }
+      return list;
+    });
+  });
+
+  Stream<List<WeekTotal>> watchRecentWeekTotals(int weeks) => _watch(() async {
+    final today = _dateOnly(DateTime.now());
+    final startOfWeek = today.subtract(Duration(days: today.weekday - 1)); // Monday
+    final start = startOfWeek.subtract(Duration(days: 7 * (weeks - 1)));
+    final end = startOfWeek.add(const Duration(days: 7));
+
+    return _fetch((db) async {
+      final rows = await db.rawQuery('''
+            SELECT date(date, 'weekday 0', '-6 days') AS week_start, SUM(amount) AS total
+            FROM expenses
+            WHERE date >= ? AND date < ?
+            GROUP BY week_start
+            ORDER BY week_start ASC
+          ''', [_dateStr(start), _dateStr(end)]);
+
+      final map = <String, int>{};
+      for (final r in rows) {
+        final ws = (r['week_start'] as String?) ?? '';
+        map[ws] = (r['total'] as int?) ?? 0;
+      }
+
+      final list = <WeekTotal>[];
+      for (int i = 0; i < weeks; i++) {
+        final ws = DateTime(start.year, start.month, start.day + (7 * i));
+        final key = _dateStr(ws);
+        list.add(WeekTotal(weekStart: ws, total: map[key] ?? 0));
+      }
+      return list;
     });
   });
 

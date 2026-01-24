@@ -455,6 +455,56 @@ class _AnalyticsPageState extends State<AnalyticsPage> {
           Card(
             child: Padding(
               padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: StreamBuilder<int>(
+                      stream: widget.db.watchTodayTotal(),
+                      builder: (context, snap) {
+                        final total = snap.data ?? 0;
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('今日の支出', style: TextStyle(fontSize: 12)),
+                            const SizedBox(height: 4),
+                            Text(
+                              _yen(total),
+                              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                            ),
+                          ],
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: StreamBuilder<int>(
+                      stream: widget.db.watchMonthTotal(widget.month),
+                      builder: (context, snap) {
+                        final total = snap.data ?? 0;
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('今月の支出', style: TextStyle(fontSize: 12)),
+                            const SizedBox(height: 4),
+                            Text(
+                              _yen(total),
+                              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                            ),
+                          ],
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -643,24 +693,19 @@ class MonthCalendar extends StatelessWidget {
     final leadingBlanks = firstWeekday % 7; // 日曜始まり
 
     const weeks = 6;
-    final cellCount = weeks * 7;
-
+    const cellCount = weeks * 7;
     const labels = ['日', '月', '火', '水', '木', '金', '土'];
 
-    // ★ Overflow対策：利用できる高さから「セルの高さ」を計算して固定する
     return LayoutBuilder(
       builder: (context, c) {
-        const headerH = 20.0; // 曜日行
-        const gapH = 4.0;
-        const mainSpace = 4.0; // 縦の隙間（grid内）
+        // MonthCalendar は Analytics の固定高さ（例: 260）内で使う。
+        // 端末差で溢れないように、使える高さから「セル高さ」を計算して固定する。
+        const headerH = 22.0; // 曜日表示の高さ
+        const gapH = 4.0; // ヘッダーとグリッドの間
+        final gridH = (c.maxHeight - headerH - gapH).clamp(0.0, double.infinity);
 
-        final usable = c.maxHeight;
-        final gridH = (usable - headerH - gapH).clamp(0.0, double.infinity);
-
-        // 6行 + 行間(5個) を高さ内に収める
-        final cellH = ((gridH - (weeks - 1) * mainSpace) / weeks)
-            .floorToDouble()
-            .clamp(1.0, double.infinity);
+        // 6週ぶんを必ず収める（mainAxisExtent で高さ固定）
+        final cellH = (gridH / weeks).floorToDouble();
 
         return Column(
           children: [
@@ -673,7 +718,11 @@ class MonthCalendar extends StatelessWidget {
                       child: Center(
                         child: Text(
                           labels[i],
-                          style: const TextStyle(fontWeight: FontWeight.bold),
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                            color: _weekdayColor(i),
+                          ),
                         ),
                       ),
                     ),
@@ -688,26 +737,25 @@ class MonthCalendar extends StatelessWidget {
                 itemCount: cellCount,
                 gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                   crossAxisCount: 7,
-                  mainAxisSpacing: mainSpace,
-                  crossAxisSpacing: 4,
-                  mainAxisExtent: cellH,
+                  // 端末によって数pxだけはみ出す（BOTTOM OVERFLOWED）ことがあるので
+                  // 余白は控えめにして確実に収まるようにする
+                  mainAxisSpacing: 2,
+                  crossAxisSpacing: 2,
+                  mainAxisExtent: cellH > 0 ? cellH : 1,
                 ),
                 itemBuilder: (context, index) {
                   final dayNum = index - leadingBlanks + 1;
-                  if (dayNum < 1 || dayNum > daysInMonth) {
-                    return const SizedBox.shrink();
-                  }
+                  if (dayNum < 1 || dayNum > daysInMonth) return const SizedBox.shrink();
 
                   final key = DateTime(y, m, dayNum);
                   final total = dayTotals[key] ?? 0;
-
                   final isToday = _isSameDate(key, DateTime.now());
 
                   return InkWell(
                     borderRadius: BorderRadius.circular(10),
                     onTap: () => onDayTap(key),
                     child: Container(
-                      padding: const EdgeInsets.all(4), // 6→4（端末差での溢れも防ぐ）
+                      padding: const EdgeInsets.all(2), // ← さらに詰めて溢れを防ぐ
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(10),
                         border: Border.all(color: isToday ? Colors.black54 : Colors.black12),
@@ -717,13 +765,13 @@ class MonthCalendar extends StatelessWidget {
                         children: [
                           Text(
                             '$dayNum',
-                            style: const TextStyle(fontWeight: FontWeight.bold),
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11),
                           ),
                           const Spacer(),
                           if (total > 0)
                             Text(
                               yen(total),
-                              style: const TextStyle(fontSize: 11),
+                              style: const TextStyle(fontSize: 9),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                             ),
@@ -742,7 +790,14 @@ class MonthCalendar extends StatelessWidget {
 
   bool _isSameDate(DateTime a, DateTime b) =>
       a.year == b.year && a.month == b.month && a.day == b.day;
+
+  Color _weekdayColor(int index) {
+    if (index == 0) return Colors.red; // 日
+    if (index == 6) return Colors.lightBlue; // 土
+    return Colors.black87;
+  }
 }
+
 /* =========================
    日別明細（ボトムシート）
 ========================= */
@@ -887,106 +942,225 @@ class DayDetailSheet extends StatelessWidget {
 }
 
 /* =========================
-   一覧タブ：月別棒グラフ（タップで月詳細）
+   一覧タブ：直近（日別 / 週別 / 月別）
 ========================= */
 
-class MonthBarPage extends StatelessWidget {
+enum _RecentRange { day, week, month }
+
+class MonthBarPage extends StatefulWidget {
   final AppDb db;
   const MonthBarPage({super.key, required this.db});
 
+  @override
+  State<MonthBarPage> createState() => _MonthBarPageState();
+}
+
+class _MonthBarPageState extends State<MonthBarPage> {
+  _RecentRange _range = _RecentRange.day;
+
+  static const _recentDays = 14;
+  static const _recentWeeks = 8;
+  static const _recentMonths = 12;
+
   String _ym(DateTime m) => '${m.year}/${m.month.toString().padLeft(2, '0')}';
+  String _ymd(DateTime d) =>
+      '${d.year}/${d.month.toString().padLeft(2, '0')}/${d.day.toString().padLeft(2, '0')}';
+  String _yen(int v) => '¥${_formatComma(v)}';
+
+  String _formatComma(int v) {
+    final s = v.toString();
+    final buf = StringBuffer();
+    for (int i = 0; i < s.length; i++) {
+      final idxFromEnd = s.length - i;
+      buf.write(s[i]);
+      if (idxFromEnd > 1 && idxFromEnd % 3 == 1) buf.write(',');
+    }
+    return buf.toString();
+  }
+
+  String _weekLabel(DateTime start) {
+    final end = start.add(const Duration(days: 6));
+    return '${_ymd(start)}〜${_ymd(end)}';
+  }
+
+  Widget _buildBarChart({
+    required List<int> values,
+    required List<String> labels,
+    void Function(int index)? onTap,
+    double height = 280,
+  }) {
+    int maxV = 0;
+    for (final v in values) {
+      if (v > maxV) maxV = v;
+    }
+    final maxY = (maxV <= 0) ? 1000.0 : (maxV * 1.2).toDouble();
+
+    return SizedBox(
+      height: height,
+      child: BarChart(
+        BarChartData(
+          maxY: maxY,
+          barTouchData: BarTouchData(
+            enabled: onTap != null,
+            handleBuiltInTouches: true,
+            touchCallback: (event, response) {
+              if (onTap == null) return;
+              final spot = response?.spot;
+              if (spot == null) return;
+              if (event is FlTapUpEvent) {
+                final i = spot.touchedBarGroupIndex;
+                if (i < 0 || i >= values.length) return;
+                onTap(i);
+              }
+            },
+          ),
+          titlesData: FlTitlesData(
+            topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+            rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+            leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+            bottomTitles: AxisTitles(
+              sideTitles: SideTitles(
+                showTitles: true,
+                reservedSize: 24,
+                getTitlesWidget: (value, meta) {
+                  final i = value.toInt();
+                  if (i < 0 || i >= labels.length) return const SizedBox.shrink();
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(labels[i], style: const TextStyle(fontSize: 10)),
+                  );
+                },
+              ),
+            ),
+          ),
+          gridData: const FlGridData(show: false),
+          borderData: FlBorderData(show: false),
+          barGroups: List.generate(values.length, (i) {
+            return BarChartGroupData(
+              x: i,
+              barRods: [
+                BarChartRodData(
+                  toY: values[i].toDouble(),
+                  width: 12,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+              ],
+            );
+          }),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.all(16),
-      child: StreamBuilder<List<MonthTotal>>(
-        stream: db.watchRecentMonthTotals(12),
-        builder: (context, snap) {
-          final data = snap.data ?? const <MonthTotal>[];
-          if (data.isEmpty) return const Center(child: Text('データがありません'));
-
-          int maxV = 0;
-          for (final x in data) {
-            if (x.total > maxV) maxV = x.total;
-          }
-          final maxY = (maxV <= 0) ? 1000.0 : (maxV * 1.2).toDouble();
-
-          return Card(
+      child: ListView(
+        children: [
+          Card(
             child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('月別支出（棒をタップで詳細）', style: TextStyle(fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 10),
-                  SizedBox(
-                    height: 280,
-                    child: BarChart(
-                      BarChartData(
-                        maxY: maxY,
-                        barTouchData: BarTouchData(
-                          enabled: true,
-                          handleBuiltInTouches: true,
-                          touchCallback: (event, response) {
-                            final spot = response?.spot;
-                            if (spot == null) return;
-                            if (event is FlTapUpEvent) {
-                              final i = spot.touchedBarGroupIndex;
-                              if (i < 0 || i >= data.length) return;
-                              final m = data[i].month;
-                              Navigator.push(
-                                context,
-                                MaterialPageRoute(
-                                  builder: (_) => MonthDetailPage(db: db, month: m),
-                                ),
-                              );
-                            }
-                          },
-                        ),
-                        titlesData: FlTitlesData(
-                          topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                          rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                          leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                          bottomTitles: AxisTitles(
-                            sideTitles: SideTitles(
-                              showTitles: true,
-                              reservedSize: 24,
-                              getTitlesWidget: (value, meta) {
-                                final i = value.toInt();
-                                if (i < 0 || i >= data.length) return const SizedBox.shrink();
-                                return Padding(
-                                  padding: const EdgeInsets.only(top: 6),
-                                  child: Text('${data[i].month.month}', style: const TextStyle(fontSize: 11)),
-                                );
-                              },
-                            ),
-                          ),
-                        ),
-                        gridData: const FlGridData(show: false),
-                        borderData: FlBorderData(show: false),
-                        barGroups: List.generate(data.length, (i) {
-                          return BarChartGroupData(
-                            x: i,
-                            barRods: [
-                              BarChartRodData(
-                                toY: data[i].total.toDouble(),
-                                width: 14,
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                            ],
-                          );
-                        }),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text('対象: ${_ym(data.first.month)} 〜 ${_ym(data.last.month)}'),
-                ],
+              padding: const EdgeInsets.all(8),
+              child: Center(
+                child: ToggleButtons(
+                  isSelected: [
+                    _range == _RecentRange.day,
+                    _range == _RecentRange.week,
+                    _range == _RecentRange.month,
+                  ],
+                  onPressed: (index) => setState(() => _range = _RecentRange.values[index]),
+                  borderRadius: BorderRadius.circular(8),
+                  constraints: const BoxConstraints(minHeight: 36, minWidth: 90),
+                  children: const [
+                    Padding(padding: EdgeInsets.symmetric(horizontal: 6), child: Text('日別')),
+                    Padding(padding: EdgeInsets.symmetric(horizontal: 6), child: Text('週別')),
+                    Padding(padding: EdgeInsets.symmetric(horizontal: 6), child: Text('月別')),
+                  ],
+                ),
               ),
             ),
-          );
-        },
+          ),
+          const SizedBox(height: 12),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: _range == _RecentRange.day
+                  ? StreamBuilder<List<DayTotal>>(
+                      stream: widget.db.watchRecentDayTotals(_recentDays),
+                      builder: (context, snap) {
+                        final data = snap.data ?? const <DayTotal>[];
+                        if (data.isEmpty) return const Center(child: Text('データがありません'));
+                        final labels = data.map((d) => '${d.day.month}/${d.day.day}').toList();
+                        final values = data.map((d) => d.total).toList();
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('直近日別（縦棒）', style: TextStyle(fontWeight: FontWeight.bold)),
+                            const SizedBox(height: 10),
+                            _buildBarChart(values: values, labels: labels, height: 260),
+                            const SizedBox(height: 8),
+                            Text('対象: ${_ymd(data.first.day)} 〜 ${_ymd(data.last.day)}'),
+                          ],
+                        );
+                      },
+                    )
+                  : _range == _RecentRange.week
+                      ? StreamBuilder<List<WeekTotal>>(
+                          stream: widget.db.watchRecentWeekTotals(_recentWeeks),
+                          builder: (context, snap) {
+                            final data = snap.data ?? const <WeekTotal>[];
+                            if (data.isEmpty) return const Center(child: Text('データがありません'));
+                            final labels = data
+                                .map((d) => '${d.weekStart.month}/${d.weekStart.day}')
+                                .toList();
+                            final values = data.map((d) => d.total).toList();
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text('直近週別（縦棒）', style: TextStyle(fontWeight: FontWeight.bold)),
+                                const SizedBox(height: 10),
+                                _buildBarChart(values: values, labels: labels, height: 260),
+                                const SizedBox(height: 8),
+                                Text('対象: ${_weekLabel(data.first.weekStart)} 〜 ${_weekLabel(data.last.weekStart)}'),
+                              ],
+                            );
+                          },
+                        )
+                      : StreamBuilder<List<MonthTotal>>(
+                          stream: widget.db.watchRecentMonthTotals(_recentMonths),
+                          builder: (context, snap) {
+                            final data = snap.data ?? const <MonthTotal>[];
+                            if (data.isEmpty) return const Center(child: Text('データがありません'));
+                            final labels = data.map((d) => '${d.month.month}').toList();
+                            final values = data.map((d) => d.total).toList();
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text('直近月別（縦棒）', style: TextStyle(fontWeight: FontWeight.bold)),
+                                const SizedBox(height: 10),
+                                _buildBarChart(
+                                  values: values,
+                                  labels: labels,
+                                  height: 260,
+                                  onTap: (i) {
+                                    final m = data[i].month;
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (_) => MonthDetailPage(db: widget.db, month: m),
+                                      ),
+                                    );
+                                  },
+                                ),
+                                const SizedBox(height: 8),
+                                Text('対象: ${_ym(data.first.month)} 〜 ${_ym(data.last.month)}'),
+                              ],
+                            );
+                          },
+                        ),
+            ),
+          ),
+        ],
       ),
     );
   }
